@@ -654,38 +654,145 @@ function copyReply(id,e){
   if(t&&t.value)navigator.clipboard.writeText(t.value).then(()=>toast('Reply copied!'));
 }
 
-/* ── AI DRAFT ── */
-async function aiDraft(id,e){
-  e.stopPropagation();
-  const m=msgsForDate(activeDate).find(x=>x.id===id);const ta=document.getElementById('rt-'+id);
-  if(!m||!ta)return;ta.value='Drafting…';ta.disabled=true;
-  try{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:300,system:'Draft a professional warm reply on behalf of an Indian university director. Under 80 words. Return only the email body.',messages:[{role:'user',content:`Reply to:\nFrom: ${m.sender}\nSubject: ${m.subject}\nMessage: ${m.body}`}]})});
-    const d=await r.json();ta.value=d.content?.[0]?.text||'Could not draft.';
-  }catch{ta.value='Error — try again.';}
-  ta.disabled=false;
-}
-
-/* ── AI SUMMARIZE ── */
+/* ── SMART LOCAL SUMMARIZE ── */
 function resetSummary(){
   document.getElementById('f-summary').value='';
   document.getElementById('aiStatus').textContent='';
   document.getElementById('pgbar').style.width='0';
 }
-async function runAISummary(){
+
+function smartSummarize(text){
+  // Clean up text
+  const t=text.replace(/\s+/g,' ').replace(/dear\s+\w+[,.]?/gi,'').replace(/respected\s+\w+[,.]?/gi,'').replace(/hi\s+\w+[,.]?/gi,'').replace(/hello\s+\w+[,.]?/gi,'').trim();
+
+  // Detect key patterns and build a smart summary
+  const low=t.toLowerCase();
+
+  // Amount / money detection
+  const amtMatch=t.match(/₹[\d,]+(\s*(lakh|lakhs|L|crore|cr|k))?|\d+[\d,]*\s*(lakh|lakhs|crore|rupees|rs)/i);
+  const amt=amtMatch?amtMatch[0].trim():null;
+
+  // Deadline detection
+  const dlMatch=t.match(/by\s+(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this\s+\w+|\d+\s*\w+)/i)||t.match(/(deadline|last\s+date|due\s+by)[^.]*?(\w+day|\d+\s*\w+)/i);
+  const dl=dlMatch?dlMatch[0].replace(/deadline|last date|due by/i,'').trim():null;
+
+  // Action keywords → summary templates
+  const patterns=[
+    {k:['reimbursement','reimburse'],       fn:()=>`${getSender()} needs reimbursement approval${amt?' of '+amt:''}${dl?', deadline '+dl:''}`},
+    {k:['approval','approve','sign off'],    fn:()=>`${getSender()} requesting approval${amt?' for '+amt+' budget':''} — action needed`},
+    {k:['budget','funds','funding'],         fn:()=>`${getSender()} submitted${amt?' ₹'+clean(amt)+' ':' '}budget for approval`},
+    {k:['mou','memorandum','collaboration','partnership','tie-up'], fn:()=>`${getSender()} proposing collaboration or MoU — review needed`},
+    {k:['keynote','guest lecture','speaker','seminar','symposium'], fn:()=>`${getSender()} inviting sir for keynote or guest lecture`},
+    {k:['resignation','resign'],             fn:()=>`${getSender()} submitted resignation — urgent attention needed`},
+    {k:['complaint','grievance','issue'],    fn:()=>`${getSender()} raised a complaint or grievance — needs review`},
+    {k:['grant','disbursement','disburse'],  fn:()=>`Grant${amt?' of '+amt:''} received from ${getSender()} — note deadline`},
+    {k:['naac','nba','accreditation'],       fn:()=>`Accreditation update from ${getSender()} — review required`},
+    {k:['meeting','schedule','agenda'],      fn:()=>`${getSender()} requesting meeting or sharing agenda`},
+    {k:['promotion','increment','appraisal'],fn:()=>`${getSender()} submitted promotion or appraisal request`},
+    {k:['leave','absence','off'],            fn:()=>`${getSender()} applied for leave — awaiting approval`},
+    {k:['invoice','payment','bill','dues'],  fn:()=>`${getSender()} sent invoice or payment request${amt?' of '+amt:''}`},
+    {k:['connection','connect','linkedin','network'], fn:()=>`${getSender()} sent LinkedIn connection or collaboration request`},
+    {k:['congratulations','felicitation','award'],  fn:()=>`${getSender()} sent congratulations or award message`},
+    {k:['followup','follow up','follow-up','reminder','awaiting'],fn:()=>`${getSender()} following up on pending matter — needs response`},
+    {k:['project','proposal','report'],      fn:()=>`${getSender()} submitted project proposal or report for review`},
+    {k:['donation','csr','contribution'],    fn:()=>`${getSender()} offering donation or CSR contribution`},
+    {k:['admission','enrollment','student'], fn:()=>`${getSender()} raised student or admission related matter`},
+    {k:['noc','certificate','letter'],       fn:()=>`${getSender()} requesting NOC or official letter from director`},
+  ];
+
+  function getSender(){
+    const s=document.getElementById('f-sender').value.trim();
+    return s?s.split(',')[0].split(' ')[0]:'Sender';
+  }
+  function clean(s){return s.replace(/[₹\s]/g,'');}
+
+  for(const p of patterns){
+    if(p.k.some(k=>low.includes(k))){
+      const summary=p.fn();
+      return trimTo15(summary);
+    }
+  }
+
+  // Fallback: extract first meaningful sentence
+  const sents=t.split(/[.!?]+/).map(s=>s.trim()).filter(s=>s.length>20&&s.length<200);
+  if(sents.length){return trimTo15(sents[0]);}
+  return trimTo15(t);
+}
+
+function trimTo15(text){
+  const words=text.replace(/\s+/g,' ').trim().split(' ');
+  if(words.length<=15)return words.join(' ');
+  // Trim smartly — don't cut mid-phrase
+  return words.slice(0,14).join(' ')+'…';
+}
+
+function runAISummary(){
   const body=document.getElementById('f-body').value.trim();
   if(!body){toast('Paste the message first.');return;}
   const btn=document.getElementById('aiSumBtn'),stat=document.getElementById('aiStatus'),pg=document.getElementById('pgbar');
   btn.disabled=true;btn.textContent='Summarizing…';stat.textContent='';pg.style.width='0';
-  let p=0;const iv=setInterval(()=>{p=Math.min(p+8,88);pg.style.width=p+'%';},110);
-  try{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:60,system:'Summarize the message in EXACTLY under 15 words. Direct and action-oriented. No punctuation at end. Return only the summary.',messages:[{role:'user',content:body}]})});
-    const d=await r.json();
+  // Animate progress bar
+  let p=0;const iv=setInterval(()=>{p=Math.min(p+15,90);pg.style.width=p+'%';},80);
+  setTimeout(()=>{
     clearInterval(iv);pg.style.width='100%';
-    document.getElementById('f-summary').value=(d.content?.[0]?.text||'').trim();
-    stat.textContent='✓ Done';setTimeout(()=>pg.style.width='0',700);
-  }catch{clearInterval(iv);pg.style.width='0';stat.textContent='Error';}
-  btn.disabled=false;btn.textContent='✦ AI summarize (under 15 words)';
+    const summary=smartSummarize(body);
+    document.getElementById('f-summary').value=summary;
+    stat.textContent='✓ Done';
+    setTimeout(()=>pg.style.width='0',600);
+    btn.disabled=false;btn.textContent='✦ Summarize (under 15 words)';
+  },600);
+}
+
+/* ── SMART DRAFT REPLY ── */
+function aiDraft(id,e){
+  e.stopPropagation();
+  const m=msgsForDate(activeDate).find(x=>x.id===id);
+  const ta=document.getElementById('rt-'+id);
+  if(!m||!ta)return;
+
+  const low=(m.body||'').toLowerCase();
+  const subj=(m.subject||'').toLowerCase();
+  const name=m.sender.split(',')[0].split(' ')[0];
+
+  // Detect tone needed
+  const isUrgent=m.priority==='urgent';
+  const isInvite=low.includes('keynote')||low.includes('lecture')||low.includes('seminar')||low.includes('speaker');
+  const isCollab=low.includes('mou')||low.includes('collaboration')||low.includes('partnership');
+  const isReimb=low.includes('reimburs');
+  const isLeave=low.includes('leave')||low.includes('absence');
+  const isPromo=low.includes('promotion')||low.includes('increment');
+  const isGrant=low.includes('grant')||low.includes('disburse');
+  const isMeeting=low.includes('meeting')||low.includes('schedule');
+  const isThankYou=low.includes('congratulat')||low.includes('felicit')||low.includes('award');
+
+  let reply='';
+  const greeting=`Dear ${name},\n\n`;
+  const closing=`\n\nWarm regards,\nDirector\nJECRC University`;
+
+  if(isReimb){
+    reply=greeting+'Thank you for your message. Your reimbursement request has been noted and we will process the approval at the earliest. Kindly coordinate with the Finance department for further steps.'+closing;
+  }else if(isInvite){
+    reply=greeting+'Thank you for the kind invitation. We are honoured by your gesture and will revert with our availability shortly. Looking forward to the possibility of engaging with your esteemed institution.'+closing;
+  }else if(isCollab){
+    reply=greeting+'Thank you for sharing the collaboration proposal. We have reviewed the same with interest and would be happy to take this forward. Kindly schedule a meeting at a mutually convenient time to discuss further.'+closing;
+  }else if(isLeave){
+    reply=greeting+'Your leave application has been received and noted. The same is approved/under review and you will be informed shortly. Please ensure your responsibilities are delegated during your absence.'+closing;
+  }else if(isPromo){
+    reply=greeting+'Your application has been received and will be reviewed as per the institute\'s promotion policy. You will be notified of the outcome in due course.'+closing;
+  }else if(isGrant){
+    reply=greeting+'Thank you for the update. The grant disbursement has been noted and we will ensure the utilisation certificate is submitted within the stipulated timeline.'+closing;
+  }else if(isMeeting){
+    reply=greeting+'Thank you for reaching out. We acknowledge your meeting request and will confirm the schedule shortly. Please share your availability for the week ahead.'+closing;
+  }else if(isThankYou){
+    reply=greeting+'Thank you for your kind words. It is a pleasure to receive such appreciation. We look forward to continued collaboration and growth together.'+closing;
+  }else if(isUrgent){
+    reply=greeting+'Thank you for bringing this to our attention. We acknowledge the urgency and will ensure this is addressed at the earliest. Please stay available for any follow-up communication.'+closing;
+  }else{
+    reply=greeting+'Thank you for your message regarding "'+m.subject+'". We have noted the same and will revert to you shortly with the necessary response or action.'+closing;
+  }
+
+  ta.value=reply;
+  toast('Reply drafted!');
 }
 
 /* ── MODAL ── */
